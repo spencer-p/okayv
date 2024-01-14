@@ -18,7 +18,6 @@ type treenode struct {
 
 // Validate validates a slice of ordered actions which must be Write or
 // ReadResult.
-// TODO: Acknowledge write errors.
 // TODO: Accept delete instructions.
 func Validate(actions []any) error {
 	roots := map[string]*treenode{}
@@ -26,6 +25,11 @@ func Validate(actions []any) error {
 	for actioni, a := range actions {
 		switch v := a.(type) {
 		case Write:
+			// Skip errors.
+			// TODO: This should not be a magic string.
+			if v.Value == "error" {
+				continue
+			}
 			n := &treenode{
 				key:   v.Key,
 				value: v.Value,

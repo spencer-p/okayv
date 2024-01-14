@@ -91,10 +91,16 @@ func TestValidate(t *testing.T) {
 		name: "invalid notfound",
 		actions: []any{
 			w("bob to a: X=1"),
-			r("bob from a: X=1"),
 			r("bob from a: X=notfound"),
 		},
 		valid: false,
+	}, {
+		name: "write failure, ok to 404",
+		actions: []any{
+			w("bob to a: X=error"),
+			r("bob from a: X=notfound"),
+		},
+		valid: true,
 	}}
 
 	for _, tc := range table {
