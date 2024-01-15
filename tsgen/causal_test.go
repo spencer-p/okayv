@@ -101,6 +101,33 @@ func TestValidate(t *testing.T) {
 			r("bob from a: X=notfound"),
 		},
 		valid: true,
+	}, {
+		name: "my odd question answer 1",
+		actions: []any{
+			w("c1 to n1: x=1"),
+			r("c2 from n2: x=notfound"),
+			w("c1 to n1: y=2"),
+			r("c2 from n2: y=notfound"),
+		},
+		valid: true,
+	}, {
+		name: "my odd question answer 2",
+		actions: []any{
+			w("c1 to n1: x=1"),
+			r("c2 from n2: x=notfound"),
+			w("c1 to n1: y=2"),
+			r("c2 from n2: y=2"),
+		},
+		valid: true,
+	}, {
+		name: "my odd question reversed",
+		actions: []any{
+			w("c1 to n1: x=1"),
+			w("c1 to n1: y=2"),
+			r("c2 from n2: y=2"),
+			r("c2 from n2: x=notfound"),
+		},
+		valid: false,
 	}}
 
 	for _, tc := range table {
