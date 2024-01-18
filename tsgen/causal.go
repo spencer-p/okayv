@@ -19,7 +19,7 @@ type treenode struct {
 // Validate validates a slice of ordered actions which must be Write or
 // ReadResult.
 // TODO: Accept delete instructions.
-func Validate(actions []any) error {
+func ValidateCausality(actions []any) error {
 	roots := map[string]*treenode{}
 	cursors := map[string][]*treenode{}
 	for actioni, a := range actions {
