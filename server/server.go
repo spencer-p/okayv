@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"sync"
 
 	"github.com/google/uuid"
@@ -19,15 +20,15 @@ type HTTPClient interface {
 
 type nothing struct{}
 
-type column struct {
-	key, value string
-	clock      causalclock
+type Column struct {
+	Key, Value string
+	Clock      CausalClock
 }
 
-type causalclock struct {
-	id         uuid.UUID
-	context    CausalContext
-	replicated map[string]nothing
+type CausalClock struct {
+	ID         uuid.UUID
+	Context    CausalContext
+	Replicated map[string]nothing
 }
 
 type Server struct {
@@ -37,7 +38,7 @@ type Server struct {
 
 	lock  sync.RWMutex
 	maxcc CausalContext
-	data  map[string]column
+	data  map[string]Column
 }
 
 func NewServer(mux *http.ServeMux, client HTTPClient, name string) *Server {
@@ -45,11 +46,12 @@ func NewServer(mux *http.ServeMux, client HTTPClient, name string) *Server {
 		name:   name,
 		client: client,
 		maxcc:  make(CausalContext),
-		data:   make(map[string]column),
+		data:   make(map[string]Column),
 	}
 	mux.HandleFunc("/read", JSONHandler(srv.read))
 	mux.HandleFunc("/write", JSONHandler(srv.write))
 	mux.HandleFunc("/view-change", JSONHandler(srv.viewChange))
+	mux.HandleFunc("/gossip", JSONHandler(srv.recvGossip))
 	return srv
 }
 
@@ -138,9 +140,9 @@ func (s *Server) read(in KV) (KV, error) {
 		return KV{}, newerr(http.StatusNotFound, fmt.Errorf("read %q: does not exist", in.Key))
 	}
 	return KV{
-		Key:     col.key,
-		Value:   col.value,
-		Context: col.clock.context.TakeMax(in.Context),
+		Key:     col.Key,
+		Value:   col.Value,
+		Context: col.Clock.Context.TakeMax(in.Context),
 	}, nil
 }
 
@@ -159,23 +161,23 @@ func (s *Server) update(in KV, allowRewrite bool) (KV, error) {
 	existing, alreadyExists := s.data[in.Key]
 	if alreadyExists && !allowRewrite {
 		return KV{
-			Key:     existing.key,
-			Value:   existing.value,
-			Context: existing.clock.context,
+			Key:     existing.Key,
+			Value:   existing.Value,
+			Context: existing.Clock.Context,
 		}, newerr(http.StatusBadRequest, fmt.Errorf("already exists"))
 	}
 
 	in.Context.Mark(s.name)
-	newclock := causalclock{
-		id:         uuid.New(),
-		context:    in.Context,
-		replicated: map[string]nothing{s.name: {}},
+	newclock := CausalClock{
+		ID:         uuid.New(),
+		Context:    in.Context,
+		Replicated: map[string]nothing{s.name: {}},
 	}
 
-	s.data[in.Key] = column{
-		key:   in.Key,
-		value: in.Value,
-		clock: newclock,
+	s.data[in.Key] = Column{
+		Key:   in.Key,
+		Value: in.Value,
+		Clock: newclock,
 	}
 	s.maxcc = s.maxcc.TakeMax(in.Context)
 	return in, nil // NB: `in` was updated in place.
@@ -221,6 +223,7 @@ func (s *Server) forwardViewChange(in ViewChange, addr string) error {
 	if err != nil {
 		return err
 	}
+	httpreq.Header.Set("User-Agent", s.name)
 	resp, err := s.client.Do(httpreq)
 	if err != nil {
 		return err

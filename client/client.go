@@ -13,13 +13,15 @@ type HTTPClient interface {
 }
 
 type Client struct {
+	agent   string
 	address string
 	context any
 	client  HTTPClient
 }
 
-func NewClient(c HTTPClient, address string) *Client {
+func NewClient(c HTTPClient, agent, address string) *Client {
 	return &Client{
+		agent:   agent,
 		client:  c,
 		address: address,
 	}
@@ -38,13 +40,12 @@ func (c *Client) Read(key string) (string, error) {
 	if err := json.NewEncoder(&body).Encode(req); err != nil {
 		return "", err
 	}
-	fmt.Printf("the context: %#v\n", c.context)
-	fmt.Printf("the body: %s", body.String())
 
 	httpreq, err := http.NewRequest(http.MethodGet, c.address+"/read", &body)
 	if err != nil {
 		return "", err
 	}
+	httpreq.Header.Set("User-Agent", c.agent)
 	httpresp, err := c.client.Do(httpreq)
 	if err != nil {
 		return "", err
@@ -54,9 +55,7 @@ func (c *Client) Read(key string) (string, error) {
 	if err := json.NewDecoder(httpresp.Body).Decode(&resp); err != nil {
 		return "", err
 	}
-	fmt.Printf("read got ctx %#v\n", resp)
 	if ctx, ok := resp["causal-context"]; ok {
-		fmt.Printf("store ctx\n")
 		c.context = ctx
 	}
 
@@ -91,6 +90,7 @@ func (c *Client) Write(key, value string) error {
 	if err != nil {
 		return err
 	}
+	httpreq.Header.Set("User-Agent", c.agent)
 	httpresp, err := c.client.Do(httpreq)
 	if err != nil {
 		return err
@@ -112,9 +112,7 @@ func (c *Client) Write(key, value string) error {
 	if err := json.NewDecoder(httpresp.Body).Decode(&resp); err != nil {
 		return err
 	}
-	fmt.Printf("write got %#v\n", resp)
 	c.context = resp["causal-context"]
-	fmt.Printf("stored ctx: %#v\n", c.context)
 
 	return nil
 }

@@ -3,6 +3,7 @@ package harness
 import (
 	"errors"
 	"net/http"
+	"os"
 	"testing"
 
 	"github.com/spencer-p/okayv/client"
@@ -48,8 +49,9 @@ func TestSimple(t *testing.T) {
 	}
 
 	model := tsgen.NewModel()
+	recorder := Recorder{}
 	impl := &MyImpl{
-		srvclientpool:  NewClientPool(model),
+		srvclientpool:  NewClientPool(model, &recorder),
 		realclientpool: make(map[string]*client.Client),
 	}
 	for _, instr := range p {
@@ -63,6 +65,12 @@ func TestSimple(t *testing.T) {
 		for i, r := range impl.Record {
 			t.Logf("%d\t%#v", i, r)
 		}
+	}
+	file, err := writeSequenceHTML(recorder.ToSequence())
+	if err != nil {
+		t.Errorf("failed to write sequence: %v", err)
+	} else {
+		t.Logf("wrote sequence to %s", file)
 	}
 }
 
@@ -81,6 +89,9 @@ func (i *MyImpl) CreateNode(nodename string) error {
 		return err
 	}
 	_ = server.NewServer(mux, cli, nodename)
+	if err := i.srvclientpool.ViewChange(nodename); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -129,7 +140,25 @@ func (i *MyImpl) realClient(clientname string) *client.Client {
 		return c
 	}
 
-	c = client.NewClient(i.srvclientpool.AlwaysReachable(), "temp")
+	c = client.NewClient(i.srvclientpool.AlwaysReachable(), clientname, "address-to-be-replaced")
 	i.realclientpool[clientname] = c
 	return c
+}
+
+func writeSequenceHTML(contents string) (string, error) {
+	w, err := os.CreateTemp("", "sequence-*.html")
+	if err != nil {
+		return "", err
+	}
+	defer w.Close()
+	w.Write([]byte(`<!DOCTYPE html>
+<html>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+</script>
+<pre class=mermaid>
+`))
+	w.Write([]byte(contents))
+	w.Write([]byte("</pre></html>"))
+	return "file://" + w.Name(), nil
 }
