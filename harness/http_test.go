@@ -156,9 +156,16 @@ func writeSequenceHTML(contents string) (string, error) {
 <script type="module">
   import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
 </script>
+<body style="background-color: #1b1b1f"
 <pre class=mermaid>
+---
+title: Test Run Sequence Diagram
+config:
+  theme: dark
+  loglevel: debug
+---
 `))
 	w.Write([]byte(contents))
-	w.Write([]byte("</pre></html>"))
+	w.Write([]byte("</pre></body></html>"))
 	return "file://" + w.Name(), nil
 }
