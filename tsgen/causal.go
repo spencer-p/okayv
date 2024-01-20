@@ -16,6 +16,12 @@ type treenode struct {
 	before     []*treenode
 }
 
+type CausalError struct {
+	error
+	Roots   map[string]*treenode
+	Cursors map[string][]*treenode
+}
+
 // Validate validates a slice of ordered actions which must be Write or
 // ReadResult.
 // TODO: Accept delete instructions.
@@ -61,7 +67,7 @@ func ValidateCausality(actions []any) error {
 				for idx, cursor := range cursors[v.Client] {
 					// Find immediate instances of Key and see if they have Value.
 					// If not found allowed to traverse disconnected trees
-					candidates := searchhistory(v.Key, cursor, happenedbefore)
+					candidates := searchhistory(v.Key, cursor, true /*happenedbefore*/)
 					for _, c := range candidates {
 						if c.value == v.Value || (c.deleted && v.NotFound) {
 							// Valid read in prior history.
@@ -71,7 +77,7 @@ func ValidateCausality(actions []any) error {
 					considered += len(candidates)
 
 					// Find candidates in the "future".
-					candidates = searchhistory(v.Key, cursor, happenedafter)
+					candidates = searchhistory(v.Key, cursor, false /*happenedafter*/)
 					for _, c := range candidates {
 						if c.value == v.Value || (c.deleted && v.NotFound) {
 							// Valid read from the future.
@@ -97,7 +103,11 @@ func ValidateCausality(actions []any) error {
 						return nil
 					}
 				}
-				return fmt.Errorf("%s cannot read %s=%s at index %d", v.Client, v.Key, v.Value, actioni)
+				return CausalError{
+					error:   fmt.Errorf("%s cannot read %s=%s at index %d", v.Client, v.Key, v.Value, actioni),
+					Roots:   roots,
+					Cursors: cursors,
+				}
 			}()
 			if err != nil {
 				return err
@@ -111,12 +121,15 @@ func ValidateCausality(actions []any) error {
 
 // searchhistory searches history starting from roots for any reachable matching
 // keys. The paths from root to matching key never contain the key itself.
-func searchhistory(key string, root *treenode, next func(*treenode) []*treenode) []*treenode {
+func searchhistory(key string, root *treenode, before bool) []*treenode {
+	next := happenedafter
+	if before {
+		next = happenedbefore
+	}
 	matches := []*treenode{}
 	queue := []*treenode{root}
-	queued := map[*treenode]struct{}{}
-	for _, q := range queue {
-		queued[q] = struct{}{}
+	queued := map[*treenode]struct{}{
+		root: {},
 	}
 
 	for len(queue) > 0 {
@@ -124,7 +137,11 @@ func searchhistory(key string, root *treenode, next func(*treenode) []*treenode)
 		queue = queue[1:]
 		if cur.key == key {
 			matches = append(matches, cur)
-			continue // Never traverse past a valid response, as that would skip history.
+			if before {
+				continue // Never traverse backwards past a valid response, as that would skip history.
+			}
+			// It is actually legal to traverse past a valid
+			// response if we are moving forward in history.
 		}
 		for _, toq := range next(cur) {
 			if _, seen := queued[toq]; seen {
@@ -174,6 +191,10 @@ func searchunrelated(k, v string, root *treenode, unrelated []*treenode) (*treen
 }
 
 func related(a, b *treenode) bool {
+	return relateddir(a, b, happenedafter) || relateddir(a, b, happenedbefore)
+}
+
+func relateddir(a, b *treenode, next func(*treenode) []*treenode) bool {
 	queue := []*treenode{a}
 	queued := map[*treenode]struct{}{
 		a: {},
@@ -184,14 +205,7 @@ func related(a, b *treenode) bool {
 		if cur == b {
 			return true
 		}
-		for _, toq := range cur.before {
-			if _, seen := queued[toq]; seen {
-				continue
-			}
-			queue = append(queue, toq)
-			queued[toq] = struct{}{}
-		}
-		for _, toq := range cur.after {
+		for _, toq := range next(cur) {
 			if _, seen := queued[toq]; seen {
 				continue
 			}

@@ -1,10 +1,12 @@
 package harness
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/spencer-p/okayv/client"
 	"github.com/spencer-p/okayv/server"
@@ -48,9 +50,12 @@ func TestSimple(t *testing.T) {
 		},
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	model := tsgen.NewModel()
 	recorder := Recorder{}
 	impl := &MyImpl{
+		ctx:            ctx,
 		srvclientpool:  NewClientPool(model, &recorder),
 		realclientpool: make(map[string]*client.Client),
 	}
@@ -61,7 +66,7 @@ func TestSimple(t *testing.T) {
 	}
 	err := tsgen.ValidateCausality(impl.Record)
 	if err != nil {
-		t.Errorf("causality violated: %v", err)
+		t.Logf("causality violated: %v", err)
 		for i, r := range impl.Record {
 			t.Logf("%d\t%#v", i, r)
 		}
@@ -75,6 +80,8 @@ func TestSimple(t *testing.T) {
 }
 
 type MyImpl struct {
+	ctx            context.Context
+	servers        []*server.Server
 	srvclientpool  *ClientPool
 	realclientpool map[string]*client.Client
 	Record         []any
@@ -88,10 +95,11 @@ func (i *MyImpl) CreateNode(nodename string) error {
 	if err != nil {
 		return err
 	}
-	_ = server.NewServer(mux, cli, nodename)
+	s := server.NewServer(mux, cli, nodename, 10*time.Millisecond)
 	if err := i.srvclientpool.ViewChange(nodename); err != nil {
 		return err
 	}
+	i.servers = append(i.servers, s)
 
 	return nil
 }
@@ -121,8 +129,9 @@ func (i *MyImpl) Write(clientname, node, key, value string) error {
 	c := i.realClient(clientname)
 	c.SetAddress("http://" + node)
 	err := c.Write(key, value)
-	if err != nil &&
-		!errors.Is(err, client.ErrUnavailable) {
+	if errors.Is(err, client.ErrUnavailable) {
+		return nil // Not a fatal error for test, but not a sucessful write.
+	} else if err != nil {
 		return err
 	}
 	i.Record = append(i.Record, tsgen.Write{

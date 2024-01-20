@@ -7,10 +7,10 @@ type nothing struct{}
 const (
 	// Instruction codes for all possible instructions.
 	iRegNode = iota
-	iConnect
-	iPartition
 	iWrite
 	iRead
+	iConnect
+	iPartition
 )
 
 func Parse(input []byte) ([]Instr, error) {
@@ -34,7 +34,7 @@ func Parse(input []byte) ([]Instr, error) {
 		if err != nil {
 			return nil, err
 		}
-		input = input[n:]
+		input = input[n+1:]
 		result = append(result, node)
 	}
 	if err := validateProgram(result); err != nil {
@@ -96,7 +96,7 @@ func parseRead(in []byte) (Instr, int, error) {
 	if int(clientindex) >= len(clientNames) {
 		return nil, 0, fmt.Errorf("cannot name client with %d, sorry", clientindex)
 	}
-	return Write{
+	return Read{
 		Client: clientNames[clientindex],
 		Node:   nodeName(in[1]),
 		Key:    fmt.Sprintf("%02x", in[2]),
@@ -112,6 +112,9 @@ func validateProgram(program []Instr) error {
 	for idx, instr := range program {
 		switch v := instr.(type) {
 		case RegisterNode:
+			if _, ok := nodes[v.Node]; ok {
+				return fmt.Errorf("instruction %d: node already exists", idx)
+			}
 			nodes[v.Node] = nothing{}
 		case Read:
 			if _, ok := nodes[v.Node]; !ok {
@@ -122,6 +125,9 @@ func validateProgram(program []Instr) error {
 				return fmt.Errorf("instruction %d: node does not exist", idx)
 			}
 		case Connect:
+			if v.A == v.B {
+				return fmt.Errorf("node cannot partition itself")
+			}
 			if _, ok := nodes[v.A]; !ok {
 				return fmt.Errorf("instruction %d: node does not exist", idx)
 			}
@@ -129,6 +135,9 @@ func validateProgram(program []Instr) error {
 				return fmt.Errorf("instruction %d: node does not exist", idx)
 			}
 		case Partition:
+			if v.A == v.B {
+				return fmt.Errorf("node cannot partition itself")
+			}
 			if _, ok := nodes[v.A]; !ok {
 				return fmt.Errorf("instruction %d: node does not exist", idx)
 			}
