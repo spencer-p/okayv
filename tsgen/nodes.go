@@ -28,3 +28,21 @@ type Read struct {
 func (r Read) Apply(m Model, i Impl) error {
 	return i.Read(r.Client, r.Node, r.Key)
 }
+
+type Connect struct {
+	A, B string
+}
+
+func (c Connect) Apply(m Model, i Impl) error {
+	m.Connect(c.A, c.B)
+	return nil
+}
+
+type Partition struct {
+	A, B string
+}
+
+func (p Partition) Apply(m Model, i Impl) error {
+	m.Partition(p.A, p.B)
+	return nil
+}
