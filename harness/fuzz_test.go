@@ -29,7 +29,7 @@ func FuzzOkayV(f *testing.F) {
 		}
 
 		for i := 0; i < 10; i++ {
-			rand.Seed(int64(i))
+			random := rand.New(rand.NewSource(int64(i)))
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			model := tsgen.NewModel()
@@ -46,7 +46,7 @@ func FuzzOkayV(f *testing.F) {
 				}
 				// Randomly allow all servers to gossip.
 				// TODO: Shuffle the order.
-				if rand.Int()%2 == 0 {
+				if random.Int()%2 == 0 {
 					for _, s := range impl.servers {
 						s.Gossip()
 					}
@@ -73,7 +73,9 @@ func FuzzOkayV(f *testing.F) {
 				} else {
 					t.Logf("wrote sequence to %s", file)
 				}
-				return // end test
+				if t.Failed() {
+					return // end test
+				}
 			}
 		}
 	})

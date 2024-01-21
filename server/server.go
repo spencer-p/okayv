@@ -310,15 +310,14 @@ func (s *Server) recvGossip(in Gossip) (GossipResponse, error) {
 	defer s.lock.Unlock()
 
 	s.Info("Receiving gossip", "src", in.Host, "cols", len(in.Columns))
-	startIdx := s.indexNotAcked(in.Host)
-	replicate := s.events[startIdx:]
-	resp := GossipResponse{
-		Columns: replicate,
-	}
 
 	updated := s.playLog(in.Host, in.Columns)
+	startIdx := s.indexNotAcked(in.Host)
+	replicate := s.events[startIdx:]
 	s.Info("Gossip reply", "cols", len(replicate), "acks", len(updated))
-	resp.Columns = append(resp.Columns, updated...)
+	resp := GossipResponse{
+		Columns: append(replicate, updated...),
+	}
 
 	return resp, nil
 }
@@ -361,9 +360,9 @@ func (s *Server) playLog(host string, log []Column) (updated []Column) {
 					"remotetime", col.Timestamp)
 				if existing.Timestamp.After(col.Timestamp) {
 					s.Warn("Dropping remote write", "key", col.Key, "val", col.Value)
-					// Instead of short-circuiting, we take the
-					// event count but drop the column, simulating if the
-					// event had happened and was overwritten.
+					// Instead of short-circuiting, we take the event count but
+					// drop the column, simulating if the event had happened and
+					// was overwritten.
 					s.maxcc.TakeMax(col.Clock.Context)
 					continue
 				}
