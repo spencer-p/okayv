@@ -360,8 +360,12 @@ func (s *Server) playLog(host string, log []Column) (updated []Column) {
 					"localtime", existing.Timestamp,
 					"remotetime", col.Timestamp)
 				if existing.Timestamp.After(col.Timestamp) {
-					s.Warn("Rejecting remote", "key", col.Key, "val", col.Value)
-					return updated
+					s.Warn("Dropping remote write", "key", col.Key, "val", col.Value)
+					// Instead of short-circuiting, we take the
+					// event count but drop the column, simulating if the
+					// event had happened and was overwritten.
+					s.maxcc.TakeMax(col.Clock.Context)
+					continue
 				}
 			}
 		}
