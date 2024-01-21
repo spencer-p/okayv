@@ -252,5 +252,8 @@ func gossipLength(in string) string {
 	if !hasCols {
 		return ""
 	}
-	return fmt.Sprintf(" %d columns", len(cols.([]any)))
+	if s, ok := cols.([]any); ok {
+		return fmt.Sprintf(" %d cols", len(s))
+	}
+	return "done"
 }

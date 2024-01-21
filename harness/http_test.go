@@ -3,10 +3,10 @@ package harness
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"testing"
-	"fmt"
 	"time"
 
 	"github.com/spencer-p/okayv/client"
@@ -86,7 +86,7 @@ type MyImpl struct {
 	srvclientpool  *ClientPool
 	realclientpool map[string]*client.Client
 	Record         []any
-	writecount int
+	writecount     int
 }
 
 var _ tsgen.Impl = &MyImpl{}
@@ -143,7 +143,7 @@ func (i *MyImpl) Write(clientname, node, key, value string) error {
 		Value:  value,
 	})
 	i.writecount += 1
-	if witnessed :=  c.EventsWitnessed() ; witnessed > i.writecount {
+	if witnessed := c.EventsWitnessed(); witnessed > i.writecount {
 		return fmt.Errorf("Witnessed %d events which exceeds total actual writes (%d)", witnessed, i.writecount)
 	}
 	return nil
@@ -169,7 +169,10 @@ func writeSequenceHTML(contents string) (string, error) {
 	w.Write([]byte(`<!DOCTYPE html>
 <html>
 <script type="module">
-  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+mermaid.initialize({
+  maxTextSize: 1e9
+});
 </script>
 <body style="background-color: #1b1b1f"
 <pre class=mermaid>

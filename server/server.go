@@ -261,8 +261,7 @@ func (s *Server) gossipOnce(dst *url.URL) error {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	// NB: Acked holds the index such that all prior indices are acked.
-	startIdx := s.acked[dst.Host]
+	startIdx := s.indexNotAcked(dst.Host)
 	replicate := s.events[startIdx:]
 	if len(replicate) == 0 {
 		return nil
@@ -279,9 +278,20 @@ func (s *Server) gossipOnce(dst *url.URL) error {
 		return err
 	}
 
-	_ = s.playLog(resp.Columns)
-
-	// It would be nice if we could ack back to them on the same request.
+	// Play back the columns we got back, then ack them to the dst.
+	// At this point resp is expected to be empty.
+	req.Columns = s.playLog(dst.Host, resp.Columns)
+	if len(req.Columns) == 0 {
+		// End gossip if there is nothing to ack.
+		return nil
+	}
+	s.Info("Acking gossip", "dst", dst.Host, "acks", len(req.Columns))
+	if err := s.JSONRequest(http.MethodPut, dst.String()+"/gossip", req, &resp); err != nil {
+		return err
+	}
+	if len(resp.Columns) > 0 {
+		s.Warn("Expected no more gossip, dropping", "dst", dst.Host, "cols", len(resp.Columns))
+	}
 
 	return nil
 }
@@ -299,13 +309,15 @@ func (s *Server) recvGossip(in Gossip) (GossipResponse, error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	startIdx := s.acked[in.Host]
+	s.Info("Receiving gossip", "src", in.Host, "cols", len(in.Columns))
+	startIdx := s.indexNotAcked(in.Host)
 	replicate := s.events[startIdx:]
 	resp := GossipResponse{
 		Columns: replicate,
 	}
 
-	updated := s.playLog(in.Columns)
+	updated := s.playLog(in.Host, in.Columns)
+	s.Info("Gossip reply", "cols", len(replicate), "acks", len(updated))
 	resp.Columns = append(resp.Columns, updated...)
 
 	return resp, nil
@@ -314,15 +326,17 @@ func (s *Server) recvGossip(in Gossip) (GossipResponse, error) {
 // playLog plays a log of columns onto history and returns a list of updated
 // columns. Not all columns may be played.
 // playLog assumes the write lock is held.
-func (s *Server) playLog(log []Column) (updated []Column) {
+func (s *Server) playLog(host string, log []Column) (updated []Column) {
 	for _, col := range log {
 		// If the event is already recorded, only update the replication data.
 		if existing, ok := s.lookupID(col.Clock.ID); ok {
-			s.Info("Skipping prev. acked", "key", col.Key)
 			if !existing.Clock.Equal(col.Clock) {
+				s.Info("Updating replication metadata", "key", col.Key)
 				existing.Clock.Merge(col.Clock)
 				s.maxcc.TakeMax(existing.Clock.Context)
 				updated = append(updated, existing)
+			} else {
+				s.Info("Skipping prev. acked", "key", col.Key)
 			}
 			continue
 		}
@@ -340,7 +354,9 @@ func (s *Server) playLog(log []Column) (updated []Column) {
 		if concurrent {
 			if existing, exists := s.lookup(col.Key); exists {
 				s.Warn("Breaking tie by timestamp",
-					"key", col.Key, "val", col.Value,
+					"key", col.Key,
+					"localval", existing.Value,
+					"remoteval", col.Value,
 					"localtime", existing.Timestamp,
 					"remotetime", col.Timestamp)
 				if existing.Timestamp.After(col.Timestamp) {
@@ -352,7 +368,7 @@ func (s *Server) playLog(log []Column) (updated []Column) {
 
 		// The event was concurrent w.r.t us or it's one event after, we can
 		// accept it.
-		s.Info("Logging event", "key", col.Key, "val", col.Value, "ctx", col.Clock.Context)
+		s.Info("Logging event", "key", col.Key, "val", col.Value, "ctx", col.Clock.Context, "repl", col.Clock.Replicated)
 
 		// Build the new clock, marking it as an event ourselves.
 		s.maxcc.TakeMax(col.Clock.Context)
@@ -364,9 +380,6 @@ func (s *Server) playLog(log []Column) (updated []Column) {
 		s.events = append(s.events, col)
 		s.latest[col.Key] = len(s.events) - 1
 		s.byid[col.Clock.ID.String()] = len(s.events) - 1
-		for host := range col.Clock.Replicated {
-			s.acked[host] = len(s.events)
-		}
 		updated = append(updated, col)
 	}
 	return updated
@@ -421,4 +434,16 @@ func (cc *CausalClock) Merge(other CausalClock) {
 
 func (cc *CausalClock) Equal(other CausalClock) bool {
 	return cc.ID == other.ID && maps.Equal(cc.Context, other.Context) && maps.Equal(cc.Replicated, cc.Replicated)
+}
+
+func (s *Server) indexNotAcked(remote string) int {
+	// NB: Acked holds the index such that all prior indices are acked.
+	for ; s.acked[remote] < len(s.events); s.acked[remote]++ {
+		i := s.acked[remote]
+		_, acked := s.events[i].Clock.Replicated[remote]
+		if !acked {
+			break
+		}
+	}
+	return s.acked[remote]
 }
