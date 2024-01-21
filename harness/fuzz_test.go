@@ -14,10 +14,16 @@ func FuzzOkayV(f *testing.F) {
 	f.Add([]byte{
 		0, 1, // Register node 1.
 		0, 2, // Register node 2.
-		3, 0, 1, 2, 2, // Alice writes 2=2 to node 1.
-		4, 0, 1, 9, // Alice reads 2 from node 1.
-		3, 0, 1, 3, 3, // Alice writes 3=3 from node 1.
-		3, 0, 2, 3, // Alice reads 3 from node 2.
+		1, 0, 1, 2, 2, // Alice writes 2=2 to node 1.
+		2, 0, 1, 2, // Alice reads 2 from node 1.
+		1, 0, 1, 3, 3, // Alice writes 3=3 from node 1.
+		2, 0, 2, 3, // Alice reads 3 from node 2.
+		4, 1, 2, // Partition nodes 1 and 2.
+		1, 0, 1, 4, 4, // Alices writes 4=4 to node 1.
+		2, 0, 2, 4, // Alices reads 4 from node 2, should fail.
+		3, 1, 2, // Heal partition between 1 and 2.
+		2, 0, 2, 4, // Alices reads 4 from node 2, should succeed eventually.
+		2, 0, 2, 4, // Alices reads 4 from node 2, should succeed eventually.
 	})
 	f.Fuzz(func(t *testing.T, input []byte) {
 		program, err := tsgen.Parse(input)
