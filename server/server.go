@@ -26,6 +26,7 @@ type nothing struct{}
 type Column struct {
 	Key, Value string
 	Clock      CausalClock
+	Timestamp  time.Time
 }
 
 type CausalClock struct {
@@ -191,9 +192,10 @@ func (s *Server) update(in KV, allowRewrite bool) (KV, error) {
 	}
 
 	s.events = append(s.events, Column{
-		Key:   in.Key,
-		Value: in.Value,
-		Clock: newclock,
+		Key:       in.Key,
+		Value:     in.Value,
+		Clock:     newclock,
+		Timestamp: time.Now(),
 	})
 	s.latest[in.Key] = len(s.events) - 1
 	s.byid[newclock.ID.String()] = len(s.events) - 1
@@ -326,9 +328,26 @@ func (s *Server) playLog(log []Column) (updated []Column) {
 		}
 
 		// Stop processing if we find events that are too far in the future.
-		if !(s.maxcc.Concurrent(col.Clock.Context) || s.maxcc.AheadOneN(col.Clock.Context, len(col.Clock.Replicated))) {
+		concurrent := s.maxcc.Concurrent(col.Clock.Context)
+		happensafter := s.maxcc.AheadOneN(col.Clock.Context, len(col.Clock.Replicated))
+		if !(concurrent || happensafter) {
 			s.Warn("Cannot ack further", "key", col.Key, "val", col.Value, "us", s.maxcc, "them", col.Clock.Context, "repl", col.Clock.Replicated)
 			return updated
+		}
+
+		// If there is a merge conflict on concurrent writes, choose a winner.
+		// If the local copy wins, stop processing.
+		if concurrent {
+			if existing, exists := s.lookup(col.Key); exists {
+				s.Warn("Breaking tie by timestamp",
+					"key", col.Key, "val", col.Value,
+					"localtime", existing.Timestamp,
+					"remotetime", col.Timestamp)
+				if existing.Timestamp.After(col.Timestamp) {
+					s.Warn("Rejecting remote", "key", col.Key, "val", col.Value)
+					return updated
+				}
+			}
 		}
 
 		// The event was concurrent w.r.t us or it's one event after, we can
