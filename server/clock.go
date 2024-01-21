@@ -1,8 +1,14 @@
 package server
 
-import "maps"
+import (
+	"maps"
+)
 
 type VectorClock map[string]int
+
+func (v VectorClock) Clone() VectorClock {
+	return maps.Clone(v)
+}
 
 func (cc *VectorClock) Mark(node string) {
 	if *cc == nil {
@@ -20,15 +26,16 @@ func (left VectorClock) AtMost(right VectorClock) bool {
 	return true
 }
 
-// TakeMax copies a and raises all its items less than b to b.
-func (a VectorClock) TakeMax(b VectorClock) VectorClock {
-	next := maps.Clone(a)
+// TakeMax raises all its items less than b to b.
+func (a *VectorClock) TakeMax(b VectorClock) {
+	if *a == nil {
+		*a = make(VectorClock)
+	}
 	for node, ctr := range b {
-		if ctr > next[node] {
-			next[node] = ctr
+		if ctr > (*a)[node] {
+			(*a)[node] = ctr
 		}
 	}
-	return next
 }
 
 // Behind returns true if us is behind them in any way.
@@ -78,8 +85,61 @@ func (us VectorClock) Concurrent(them VectorClock) bool {
 	return !us.Before(them) && !us.After(them)
 }
 
+// AheadOne returns true if us and them are equal except for one index where
+// them = us+1.
+func (us VectorClock) AheadOne(them VectorClock) bool {
+	foundPlusOne := false
+	for key := range zipkeys(us, them) {
+		diff := them[key] - us[key]
+		switch {
+		case diff < 0:
+			return false
+		case diff == 1 && foundPlusOne:
+			return false // Too many plus ones.
+		case diff == 1 && !foundPlusOne:
+			foundPlusOne = true
+		case diff > 1:
+			return false
+		case diff == 0:
+			continue
+		}
+	}
+	return foundPlusOne
+}
+
+// AheadOneN returns true if us and them are equal except for N indices where
+// them = us+1.
+func (us VectorClock) AheadOneN(them VectorClock, n int) bool {
+	numPlusOnes := 0
+	for key := range zipkeys(us, them) {
+		diff := them[key] - us[key]
+		switch {
+		case diff < 0:
+			return false
+		case diff == 1 && numPlusOnes == n:
+			return false // Too many plus ones.
+		case diff == 1:
+			numPlusOnes++
+		case diff > 1:
+			return false
+		case diff == 0:
+			continue
+		}
+	}
+	return numPlusOnes == n
+}
+
+func (us VectorClock) Equal(them VectorClock) bool {
+	for key := range zipkeys(us, them) {
+		if us[key] != them[key] {
+			return false
+		}
+	}
+	return true
+}
+
 func zipkeys(a, b VectorClock) map[string]struct{} {
-	var result map[string]struct{}
+	result := make(map[string]struct{})
 	for key := range a {
 		result[key] = struct{}{}
 	}

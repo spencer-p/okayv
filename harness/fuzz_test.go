@@ -42,8 +42,10 @@ func FuzzOkayV(f *testing.F) {
 			for _, instr := range program {
 				if err := instr.Apply(model, impl); err != nil {
 					t.Errorf("%#v error: %v", instr, err)
+					break
 				}
 				// Randomly allow all servers to gossip.
+				// TODO: Shuffle the order.
 				if rand.Int()%2 == 0 {
 					for _, s := range impl.servers {
 						s.Gossip()

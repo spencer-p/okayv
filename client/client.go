@@ -116,3 +116,17 @@ func (c *Client) Write(key, value string) error {
 
 	return nil
 }
+
+func (c *Client) EventsWitnessed() int {
+	ctx, ok := c.context.(map[string]any)
+	if !ok {
+		return 0
+	}
+	result := 0
+	for _, u := range ctx {
+		if v, ok := u.(float64); ok {
+			result = max(result, int(v))
+		}
+	}
+	return result
+}

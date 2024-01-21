@@ -5,14 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"maps"
 	"math/rand"
 	"net/http"
 	"net/url"
-	"slices"
+	"os"
 	"sync"
 	"time"
 
+	"github.com/charmbracelet/log"
 	"github.com/google/uuid"
 )
 
@@ -34,6 +35,7 @@ type CausalClock struct {
 }
 
 type Server struct {
+	*log.Logger
 	client     HTTPClient
 	name       string
 	peers      []*url.URL
@@ -43,21 +45,28 @@ type Server struct {
 	maxcc  VectorClock
 	events []Column
 	latest map[string]int
-	data   map[string]Column
+	acked  map[string]int
+	byid   map[string]int
 }
 
 func NewServer(mux *http.ServeMux, client HTTPClient, name string, gossipFreq time.Duration) *Server {
 	srv := &Server{
+		Logger: log.NewWithOptions(os.Stderr, log.Options{
+			Prefix: fmt.Sprintf("[%s]", name),
+		}),
 		name:       name,
 		client:     client,
 		maxcc:      make(VectorClock),
-		data:       make(map[string]Column),
+		latest:     make(map[string]int),
+		acked:      make(map[string]int),
+		byid:       make(map[string]int),
 		gossipFreq: gossipFreq,
 	}
 	mux.HandleFunc("/read", JSONHandler(srv.read))
 	mux.HandleFunc("/write", JSONHandler(srv.write))
 	mux.HandleFunc("/view-change", JSONHandler(srv.viewChange))
 	mux.HandleFunc("/gossip", JSONHandler(srv.recvGossip))
+	srv.Infof("Starting")
 	return srv
 }
 
@@ -95,6 +104,7 @@ func JSONHandler[In any, Out any](h func(In) (Out, error)) func(http.ResponseWri
 			return
 		}
 
+		w.Header().Set("Content-Type", "application/json")
 		out, err := h(in)
 		if err != nil {
 			code := http.StatusInternalServerError
@@ -103,20 +113,15 @@ func JSONHandler[In any, Out any](h func(In) (Out, error)) func(http.ResponseWri
 			}
 
 			w.WriteHeader(code)
-			if err := json.NewEncoder(w).Encode(withError{
+			_ = json.NewEncoder(w).Encode(withError{
 				any:   out,
 				Error: err.Error(),
-			}); err != nil {
-				log.Printf("Failed to marshal JSON to write response: %v", err)
-				return
-			}
+			})
+			return
 		}
 
 		w.WriteHeader(http.StatusOK)
-		if err := json.NewEncoder(w).Encode(&out); err != nil {
-			log.Printf("Failed to marshal JSON to write response: %v", err)
-			return
-		}
+		_ = json.NewEncoder(w).Encode(&out)
 	}
 }
 
@@ -129,25 +134,7 @@ type KV struct {
 func (s *Server) read(in KV) (KV, error) {
 	s.lock.RLock()
 	defer s.lock.RUnlock()
-
-	if !in.Context.AtMost(s.maxcc) {
-		return KV{}, newerr(http.StatusServiceUnavailable, fmt.Errorf("cannot service client"))
-	}
-
-	col, ok := s.data[in.Key]
-	if !ok {
-		return KV{}, newerr(http.StatusNotFound, fmt.Errorf("read %q: does not exist", in.Key))
-	}
-	return KV{
-		Key:     col.Key,
-		Value:   col.Value,
-		Context: col.Clock.Context.TakeMax(in.Context),
-	}, nil
-}
-
-func (s *Server) read2(in KV) (KV, error) {
-	s.lock.RLock()
-	defer s.lock.RUnlock()
+	s.Info("Read", "key", in.Key, "ctx", in.Context)
 
 	if s.maxcc.Behind(in.Context) {
 		return KV{}, newerr(http.StatusServiceUnavailable, fmt.Errorf("cannot service client"))
@@ -155,53 +142,23 @@ func (s *Server) read2(in KV) (KV, error) {
 
 	col, ok := s.lookup(in.Key)
 	if !ok {
-		return KV{}, newerr(http.StatusNotFound, fmt.Errorf("read %q: does not exist", in.Key))
+		return in, newerr(http.StatusNotFound, fmt.Errorf("read %q: does not exist", in.Key))
 	}
+	newctx := col.Clock.Context.Clone()
+	newctx.TakeMax(in.Context)
 	return KV{
 		Key:     col.Key,
 		Value:   col.Value,
-		Context: col.Clock.Context.TakeMax(in.Context),
+		Context: newctx,
 	}, nil
 }
 
 func (s *Server) write(in KV) (KV, error) {
+	s.Info("Write", "key", in.Key, "val", in.Value, "ctx", in.Context)
 	return s.update(in, true)
 }
 
 func (s *Server) update(in KV, allowRewrite bool) (KV, error) {
-	s.lock.Lock()
-	defer s.lock.Unlock()
-
-	if !in.Context.AtMost(s.maxcc) {
-		return KV{}, newerr(http.StatusServiceUnavailable, fmt.Errorf("cannot service client"))
-	}
-
-	existing, alreadyExists := s.data[in.Key]
-	if alreadyExists && !allowRewrite {
-		return KV{
-			Key:     existing.Key,
-			Value:   existing.Value,
-			Context: existing.Clock.Context,
-		}, newerr(http.StatusBadRequest, fmt.Errorf("already exists"))
-	}
-
-	in.Context.Mark(s.name)
-	newclock := CausalClock{
-		ID:         uuid.New(),
-		Context:    in.Context,
-		Replicated: map[string]nothing{s.name: {}},
-	}
-
-	s.data[in.Key] = Column{
-		Key:   in.Key,
-		Value: in.Value,
-		Clock: newclock,
-	}
-	s.maxcc = s.maxcc.TakeMax(in.Context)
-	return in, nil // NB: `in` was updated in place.
-}
-
-func (s *Server) update2(in KV, allowRewrite bool) (KV, error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
@@ -218,10 +175,18 @@ func (s *Server) update2(in KV, allowRewrite bool) (KV, error) {
 		}, newerr(http.StatusBadRequest, fmt.Errorf("already exists"))
 	}
 
-	in.Context.Mark(s.name)
+	// If the client is writing something we already have, ack w/o doing
+	// anything but advance their clock if needed.
+	if alreadyExists && in.Key == existing.Key && in.Value == existing.Value {
+		in.Context.TakeMax(existing.Clock.Context)
+		return in, nil
+	}
+
+	s.maxcc.TakeMax(in.Context)
+	s.maxcc.Mark(s.name)
 	newclock := CausalClock{
 		ID:         uuid.New(),
-		Context:    in.Context,
+		Context:    s.maxcc.Clone(),
 		Replicated: map[string]nothing{s.name: {}},
 	}
 
@@ -231,8 +196,12 @@ func (s *Server) update2(in KV, allowRewrite bool) (KV, error) {
 		Clock: newclock,
 	})
 	s.latest[in.Key] = len(s.events) - 1
-	s.maxcc = s.maxcc.TakeMax(in.Context)
-	return in, nil // NB: `in` was updated in place.
+	s.byid[newclock.ID.String()] = len(s.events) - 1
+	return KV{
+		Key:     in.Key,
+		Value:   in.Value,
+		Context: newclock.Context,
+	}, nil
 }
 
 type ViewChange struct {
@@ -289,78 +258,99 @@ func (s *Server) forwardViewChange(in ViewChange, addr string) error {
 func (s *Server) gossipOnce(dst *url.URL) error {
 	s.lock.Lock()
 	defer s.lock.Unlock()
-	var keys []string
-	req := Gossip{}
-	for key, col := range s.data {
-		if _, replicated := col.Clock.Replicated[dst.Host]; !replicated {
-			req.Columns = append(req.Columns, col)
-			keys = append(keys, key)
-		}
-	}
-	if len(req.Columns) == 0 {
+
+	// NB: Acked holds the index such that all prior indices are acked.
+	startIdx := s.acked[dst.Host]
+	replicate := s.events[startIdx:]
+	if len(replicate) == 0 {
 		return nil
+	}
+	req := Gossip{
+		Host:    s.name,
+		Columns: replicate,
 	}
 
 	// Push to other server.
-	var body bytes.Buffer
-	if err := json.NewEncoder(&body).Encode(req); err != nil {
+	s.Info("Send gossip", "dst", dst.Host, "cols", len(req.Columns))
+	var resp GossipResponse
+	if err := s.JSONRequest(http.MethodPut, dst.String()+"/gossip", req, &resp); err != nil {
 		return err
 	}
-	httpreq, err := http.NewRequest(http.MethodGet, dst.String()+"/gossip", &body)
-	if err != nil {
-		return err
-	}
-	httpreq.Header.Set("User-Agent", s.name)
-	httpresp, err := s.client.Do(httpreq)
-	if err != nil {
-		return err
-	}
-	defer httpresp.Body.Close()
 
-	for _, key := range keys {
-		s.data[key].Clock.Replicated[dst.Host] = nothing{}
-	}
+	_ = s.playLog(resp.Columns)
+
+	// It would be nice if we could ack back to them on the same request.
 
 	return nil
 }
 
 type Gossip struct {
+	Host    string
 	Columns []Column
 }
 
 type GossipResponse struct {
-	AckedKeys []string
+	Columns []Column
 }
 
 func (s *Server) recvGossip(in Gossip) (GossipResponse, error) {
-	var resp GossipResponse
-	// The new pairs must be applied in the correct order.
-	slices.SortFunc(in.Columns, func(a, b Column) int {
-		if a.Clock.Context.AtMost(b.Clock.Context) {
-			return -1
-		}
-		return 1
-	})
-
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	for _, col := range in.Columns {
-		//		if !col.Clock.Context.AtMost(s.maxcc) {
-		//			return resp, newerr(http.StatusServiceUnavailable, fmt.Errorf("cannot accept"))
-		//		}
-
-		_, ok := s.data[col.Key]
-		if !ok {
-			s.data[col.Key] = col
-			col.Clock.Replicated[s.name] = nothing{}
-			col.Clock.Context.Mark(s.name)
-			s.maxcc = s.maxcc.TakeMax(col.Clock.Context)
-			continue
-		}
+	startIdx := s.acked[in.Host]
+	replicate := s.events[startIdx:]
+	resp := GossipResponse{
+		Columns: replicate,
 	}
 
+	updated := s.playLog(in.Columns)
+	resp.Columns = append(resp.Columns, updated...)
+
 	return resp, nil
+}
+
+// playLog plays a log of columns onto history and returns a list of updated
+// columns. Not all columns may be played.
+// playLog assumes the write lock is held.
+func (s *Server) playLog(log []Column) (updated []Column) {
+	for _, col := range log {
+		// If the event is already recorded, only update the replication data.
+		if existing, ok := s.lookupID(col.Clock.ID); ok {
+			s.Info("Skipping prev. acked", "key", col.Key)
+			if !existing.Clock.Equal(col.Clock) {
+				existing.Clock.Merge(col.Clock)
+				s.maxcc.TakeMax(existing.Clock.Context)
+				updated = append(updated, existing)
+			}
+			continue
+		}
+
+		// Stop processing if we find events that are too far in the future.
+		if !(s.maxcc.Concurrent(col.Clock.Context) || s.maxcc.AheadOneN(col.Clock.Context, len(col.Clock.Replicated))) {
+			s.Warn("Cannot ack further", "key", col.Key, "val", col.Value, "us", s.maxcc, "them", col.Clock.Context, "repl", col.Clock.Replicated)
+			return updated
+		}
+
+		// The event was concurrent w.r.t us or it's one event after, we can
+		// accept it.
+		s.Info("Logging event", "key", col.Key, "val", col.Value, "ctx", col.Clock.Context)
+
+		// Build the new clock, marking it as an event ourselves.
+		s.maxcc.TakeMax(col.Clock.Context)
+		s.maxcc.Mark(s.name)
+		col.Clock.Context = s.maxcc.Clone()
+		col.Clock.Replicated[s.name] = nothing{}
+
+		// Append it to history.
+		s.events = append(s.events, col)
+		s.latest[col.Key] = len(s.events) - 1
+		s.byid[col.Clock.ID.String()] = len(s.events) - 1
+		for host := range col.Clock.Replicated {
+			s.acked[host] = len(s.events)
+		}
+		updated = append(updated, col)
+	}
+	return updated
 }
 
 func (s *Server) lookup(key string) (Column, bool) {
@@ -369,4 +359,47 @@ func (s *Server) lookup(key string) (Column, bool) {
 		return Column{}, false
 	}
 	return s.events[idx], true
+}
+
+func (s *Server) lookupID(id uuid.UUID) (Column, bool) {
+	idx, ok := s.byid[id.String()]
+	if !ok {
+		return Column{}, false
+	}
+	return s.events[idx], true
+}
+
+func (s *Server) JSONRequest(method string, addr string, input any, output any) error {
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(input); err != nil {
+		return err
+	}
+
+	httpreq, err := http.NewRequest(method, addr, &body)
+	if err != nil {
+		return err
+	}
+	httpreq.Header.Set("User-Agent", s.name)
+	httpreq.Header.Set("Content-Type", "application/json")
+	httpresp, err := s.client.Do(httpreq)
+	if err != nil {
+		return err
+	}
+	defer httpresp.Body.Close()
+
+	if err := json.NewDecoder(httpresp.Body).Decode(output); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (cc *CausalClock) Merge(other CausalClock) {
+	cc.Context.TakeMax(other.Context)
+	for replicated := range other.Replicated {
+		cc.Replicated[replicated] = nothing{}
+	}
+}
+
+func (cc *CausalClock) Equal(other CausalClock) bool {
+	return cc.ID == other.ID && maps.Equal(cc.Context, other.Context) && maps.Equal(cc.Replicated, cc.Replicated)
 }

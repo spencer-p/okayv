@@ -171,6 +171,7 @@ func (rec *Recorder) MakeHandler(inner http.Handler) http.Handler {
 		rec.record = append(rec.record, RecordedMessage{
 			dst:      origin,
 			src:      r.Host,
+			path:     r.URL.Path,
 			response: response,
 			code:     code,
 		})
@@ -198,6 +199,14 @@ func (r *Recorder) ToSequence() string {
 			fmt.Fprintf(&buf, "%d%s", msg.code, maybeKVString(msg.response))
 		}
 		fmt.Fprintf(&buf, "\n")
+
+		if msg.path == "/gossip" {
+			fmt.Fprintf(&buf, "\tNote over %s, %s: %s\n", msg.src, msg.dst, gossipLength(msg.response+msg.request))
+		}
+
+		if ctx := maybeCtx(msg.response); ctx != "" && msg.response != "" && (msg.path == "/write" || msg.path == "/read") {
+			fmt.Fprintf(&buf, "\tNote over %s: %s\n", msg.dst, ctx)
+		}
 	}
 	return buf.String()
 }
@@ -218,4 +227,30 @@ func maybeKVString(in string) string {
 		result += "=" + value.(string)
 	}
 	return result
+}
+
+func maybeCtx(in string) string {
+	buf := bytes.NewBufferString(in)
+	var blob map[string]any
+	if err := json.NewDecoder(buf).Decode(&blob); err != nil {
+		return ""
+	}
+	ctx, hasCtx := blob["causal-context"]
+	if !hasCtx {
+		return ""
+	}
+	return fmt.Sprintf(" %v", ctx)
+}
+
+func gossipLength(in string) string {
+	buf := bytes.NewBufferString(in)
+	var blob map[string]any
+	if err := json.NewDecoder(buf).Decode(&blob); err != nil {
+		return ""
+	}
+	cols, hasCols := blob["Columns"]
+	if !hasCols {
+		return ""
+	}
+	return fmt.Sprintf(" %d columns", len(cols.([]any)))
 }

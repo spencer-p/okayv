@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"testing"
+	"fmt"
 	"time"
 
 	"github.com/spencer-p/okayv/client"
@@ -85,6 +86,7 @@ type MyImpl struct {
 	srvclientpool  *ClientPool
 	realclientpool map[string]*client.Client
 	Record         []any
+	writecount int
 }
 
 var _ tsgen.Impl = &MyImpl{}
@@ -140,6 +142,10 @@ func (i *MyImpl) Write(clientname, node, key, value string) error {
 		Key:    key,
 		Value:  value,
 	})
+	i.writecount += 1
+	if witnessed :=  c.EventsWitnessed() ; witnessed > i.writecount {
+		return fmt.Errorf("Witnessed %d events which exceeds total actual writes (%d)", witnessed, i.writecount)
+	}
 	return nil
 }
 
