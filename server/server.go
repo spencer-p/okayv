@@ -261,8 +261,7 @@ func (s *Server) gossipOnce(dst *url.URL) error {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	startIdx := s.indexNotAcked(dst.Host)
-	replicate := s.events[startIdx:]
+	replicate := s.unreplicated(dst.Host)
 	if len(replicate) == 0 {
 		return nil
 	}
@@ -312,8 +311,7 @@ func (s *Server) recvGossip(in Gossip) (GossipResponse, error) {
 	s.Info("Receiving gossip", "src", in.Host, "cols", len(in.Columns))
 
 	updated := s.playLog(in.Host, in.Columns)
-	startIdx := s.indexNotAcked(in.Host)
-	replicate := s.events[startIdx:]
+	replicate := s.unreplicated(in.Host)
 	s.Info("Gossip reply", "cols", len(replicate), "acks", len(updated))
 	resp := GossipResponse{
 		Columns: append(replicate, updated...),
@@ -449,4 +447,18 @@ func (s *Server) indexNotAcked(remote string) int {
 		}
 	}
 	return s.acked[remote]
+}
+
+func (s *Server) unreplicated(remote string) []Column {
+	startIdx := s.indexNotAcked(remote)
+	var result []Column
+	for i := startIdx; i < len(s.events); i++ {
+		if _, acked := s.events[i].Clock.Replicated[remote]; acked {
+			// It's possible there is a block of acknowledged events
+			// between unacked events, which we can skip.
+			continue
+		}
+		result = append(result, s.events[i])
+	}
+	return result
 }
