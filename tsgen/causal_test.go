@@ -208,6 +208,18 @@ func TestValidate(t *testing.T) {
 			r("c1 from n1: x=2"),
 		},
 		valid: true,
+	}, {
+		name: "false positive fuzz #4 - with extra history",
+		actions: []any{
+			w("c1 to n1: x=1"),
+			w("c2 to n1: x=2"),
+			w("c2 to n1: z=1"),
+			r("c1 from n1: x=2"),
+			r("c1 from n1: z=1"),
+			w("c1 to n1: y=1"),
+			r("c1 from n1: x=2"),
+		},
+		valid: true,
 	}}
 
 	for _, tc := range table {

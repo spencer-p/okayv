@@ -77,10 +77,15 @@ func ValidateCausality(actions []any) error {
 					for _, c := range candidates {
 						if c.value == v.Value ||
 							(c.deleted && v.NotFound) ||
-							(c.root && v.NotFound) {
+							(c.root && v.NotFound && false) {
 							// Valid read in prior history.
 							return nil
 						}
+					}
+					// If we couldn't find anything in prior history and we got
+					// a 404, that's OK. This may be a lagging replica.
+					if v.NotFound && len(candidates) == 1 && candidates[0].root {
+						return nil
 					}
 					considered = append(considered, candidates...)
 
@@ -174,10 +179,12 @@ func searchhistory(key string, root *treenode, before bool) []*treenode {
 
 		// If we already found at least one match, and we are now searching
 		// backwards past its depth, skip.
+		// TODO: This depth stuff can be removed.
 		if before && len(matches) > 0 && qe.depth > firstmatchdepth {
-			continue
+			//continue
 		}
 
+		// TODO: I'm not sure the root node is needed.
 		if cur.key == key || cur.root {
 			matches = append(matches, cur)
 			if len(matches) == 1 {
