@@ -10,7 +10,6 @@ type ReadResult struct {
 }
 
 type treenode struct {
-	root       bool // Signifies empty/null history.
 	key, value string
 	deleted    bool
 	after      []*treenode
@@ -44,12 +43,7 @@ func ValidateCausality(actions []any) error {
 			curs, ok := cursors[v.Client]
 			if !ok {
 				// Client is new, no current context, creates a new root.
-				root := &treenode{
-					root:  true,
-					after: []*treenode{n},
-				}
-				n.before = []*treenode{root}
-				roots[v.Client] = root
+				roots[v.Client] = n
 			} else {
 				// Client's new write is causally related to its current
 				// cursors. Add happens-before relationship to tree.
@@ -76,15 +70,14 @@ func ValidateCausality(actions []any) error {
 					candidates := searchhistory(v.Key, cursor, true /*happenedbefore*/)
 					for _, c := range candidates {
 						if c.value == v.Value ||
-							(c.deleted && v.NotFound) ||
-							(c.root && v.NotFound && false) {
+							(c.deleted && v.NotFound) {
 							// Valid read in prior history.
 							return nil
 						}
 					}
 					// If we couldn't find anything in prior history and we got
 					// a 404, that's OK. This may be a lagging replica.
-					if v.NotFound && len(candidates) == 1 && candidates[0].root {
+					if v.NotFound && len(candidates) == 0 {
 						return nil
 					}
 					considered = append(considered, candidates...)
@@ -93,8 +86,7 @@ func ValidateCausality(actions []any) error {
 					candidates = searchhistory(v.Key, cursor, false /*happenedafter*/)
 					for _, c := range candidates {
 						if c.value == v.Value ||
-							(c.deleted && v.NotFound) ||
-							(c.root && v.NotFound) {
+							(c.deleted && v.NotFound) {
 							// Valid read from the future.
 							// This cursor has now advanced.
 							cursors[v.Client] = append(cursors[v.Client], c)
@@ -154,54 +146,34 @@ func ValidateCausality(actions []any) error {
 // searchhistory searches history starting from roots for any reachable matching
 // keys. The paths from root to matching key never contain the key itself.
 func searchhistory(key string, root *treenode, before bool) []*treenode {
-	type queueEntry struct {
-		node  *treenode
-		depth int
-	}
 	next := happenedafter
 	if before {
 		next = happenedbefore
 	}
 	matches := []*treenode{}
-	queue := []queueEntry{{
-		node:  root,
-		depth: 0,
-	}}
+	queue := []*treenode{root}
 	queued := map[*treenode]struct{}{
 		root: {},
 	}
-	firstmatchdepth := -1
 
 	for len(queue) > 0 {
-		qe := queue[0]
-		cur := qe.node
+		cur := queue[0]
 		queue = queue[1:]
 
-		// If we already found at least one match, and we are now searching
-		// backwards past its depth, skip.
-		// TODO: This depth stuff can be removed.
-		if before && len(matches) > 0 && qe.depth > firstmatchdepth {
-			//continue
-		}
-
-		// TODO: I'm not sure the root node is needed.
-		if cur.key == key || cur.root {
+		if cur.key == key {
 			matches = append(matches, cur)
-			if len(matches) == 1 {
-				firstmatchdepth = qe.depth
-			}
-			if before {
+			if before { // Read: If traversing backwards.
 				continue // Never traverse backwards past a valid response, as that would skip history.
 			}
 			// It is actually legal to traverse past a valid
-			// response if we are moving forward in history.
+			// response if we are fast-forwarding in history.
 		}
 
 		for _, toq := range next(cur) {
 			if _, seen := queued[toq]; seen {
 				continue
 			}
-			queue = append(queue, queueEntry{node: toq, depth: qe.depth + 1})
+			queue = append(queue, toq)
 			queued[toq] = struct{}{}
 		}
 	}

@@ -302,11 +302,7 @@ func printTree(t *testing.T, depth int, node *treenode) {
 		s += "  "
 	}
 
-	if node.root {
-		s += "root"
-	} else {
-		s += fmt.Sprintf("%s=%s", node.key, node.value)
-	}
+	s += fmt.Sprintf("%s=%s", node.key, node.value)
 	t.Logf(s)
 	for _, next := range node.after {
 		printTree(t, depth+1, next)
