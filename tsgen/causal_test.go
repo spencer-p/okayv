@@ -75,6 +75,28 @@ func TestValidate(t *testing.T) {
 		},
 		valid: false,
 	}, {
+		name: "merge in alice's favor",
+		actions: []any{
+			w("alice to a: X=1"),
+			w("bob to b: Y=1"),
+			w("bob to b: X=2"),
+			w("bob to b: Z=3"),
+			r("alice from a: Z=3"),
+			r("alice from a: X=1"),
+		},
+		valid: true,
+	}, {
+		name: "merge in bob's favor",
+		actions: []any{
+			w("alice to a: X=1"),
+			w("bob to b: Y=1"),
+			w("bob to b: X=2"),
+			w("bob to b: Z=3"),
+			r("alice from a: Z=3"),
+			r("alice from a: X=2"),
+		},
+		valid: true,
+	}, {
 		name: "valid error",
 		actions: []any{
 			w("alice to a: X=x"),
@@ -158,22 +180,55 @@ func TestValidate(t *testing.T) {
 			r("c2 from n1: x=4"),
 		},
 		valid: true,
+	}, {
+		name: "false positive fuzz #3 - lagging replica",
+		actions: []any{
+			w("c1 to n1: x=1"),
+			r("c2 from n1: x=1"),
+			w("c1 to n1: y=2"),
+			r("c2 from n2: y=notfound"),
+		},
+		valid: true,
+	}, {
+		name: "false positive fuzz #3 - bad replica",
+		actions: []any{
+			w("c1 to n1: x=1"),
+			w("c1 to n1: y=2"),
+			r("c2 from n2: y=2"),
+			r("c2 from n1: x=notfound"),
+		},
+		valid: false,
+	}, {
+		name: "false positive fuzz #4",
+		actions: []any{
+			w("c1 to n1: x=1"),
+			w("c2 to n1: x=2"),
+			r("c1 from n1: x=2"),
+			w("c1 to n1: y=1"),
+			r("c1 from n1: x=2"),
+		},
+		valid: true,
 	}}
 
 	for _, tc := range table {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "false positive fuzz #3 - lagging replica" {
+				tc.name += "" // This is your test.
+			}
 			err := ValidateCausality(tc.actions)
 			got := err == nil
 			if got != tc.valid {
 				t.Errorf("Validate returned %t, wanted %t", got, tc.valid)
 				t.Errorf("error: %v", err)
-				for _, root := range err.(CausalError).Roots {
-					printTree(t, 0, root)
-				}
-				cursors := err.(CausalError).Cursors
-				for client, curs := range cursors {
-					for i, c := range curs {
-						t.Logf("client %s has cursor %d at %s=%s", client, i, c.key, c.value)
+				if err, ok := err.(CausalError); ok {
+					for _, root := range err.Roots {
+						printTree(t, 0, root)
+					}
+					cursors := err.Cursors
+					for client, curs := range cursors {
+						for i, c := range curs {
+							t.Logf("client %s has cursor %d at %s=%s", client, i, c.key, c.value)
+						}
 					}
 				}
 			}
@@ -229,15 +284,19 @@ func r(s string) ReadResult {
 	}
 }
 
-func printTree(t *testing.T, depth int, root *treenode) {
+func printTree(t *testing.T, depth int, node *treenode) {
 	s := ""
 	for i := 0; i < depth; i++ {
 		s += "  "
 	}
 
-	s += fmt.Sprintf("%s=%s", root.key, root.value)
+	if node.root {
+		s += "root"
+	} else {
+		s += fmt.Sprintf("%s=%s", node.key, node.value)
+	}
 	t.Logf(s)
-	for _, next := range root.after {
+	for _, next := range node.after {
 		printTree(t, depth+1, next)
 	}
 }
