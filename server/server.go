@@ -35,12 +35,16 @@ type CausalClock struct {
 	Replicated map[string]nothing
 }
 
-type Server struct {
+type Opts struct {
 	*log.Logger
-	client     HTTPClient
-	name       string
-	peers      []*url.URL
-	gossipFreq time.Duration
+	Name       string
+	Client     HTTPClient
+	GossipFreq time.Duration
+}
+
+type Server struct {
+	*Opts
+	peers []*url.URL
 
 	lock   sync.RWMutex
 	maxcc  VectorClock
@@ -50,18 +54,18 @@ type Server struct {
 	byid   map[string]int
 }
 
-func NewServer(mux *http.ServeMux, client HTTPClient, name string, gossipFreq time.Duration) *Server {
+func NewServer(mux *http.ServeMux, opts Opts) *Server {
+	if opts.Logger == nil {
+		opts.Logger = log.NewWithOptions(os.Stderr, log.Options{
+			Prefix: fmt.Sprintf("[%s]", opts.Name),
+		})
+	}
 	srv := &Server{
-		Logger: log.NewWithOptions(os.Stderr, log.Options{
-			Prefix: fmt.Sprintf("[%s]", name),
-		}),
-		name:       name,
-		client:     client,
-		maxcc:      make(VectorClock),
-		latest:     make(map[string]int),
-		acked:      make(map[string]int),
-		byid:       make(map[string]int),
-		gossipFreq: gossipFreq,
+		Opts:   &opts,
+		maxcc:  make(VectorClock),
+		latest: make(map[string]int),
+		acked:  make(map[string]int),
+		byid:   make(map[string]int),
 	}
 	mux.HandleFunc("/read", JSONHandler(srv.read))
 	mux.HandleFunc("/write", JSONHandler(srv.write))
@@ -72,7 +76,7 @@ func NewServer(mux *http.ServeMux, client HTTPClient, name string, gossipFreq ti
 }
 
 func (s *Server) RunBackground(ctx context.Context) {
-	tick := time.NewTicker(s.gossipFreq)
+	tick := time.NewTicker(s.GossipFreq)
 	defer tick.Stop()
 	for {
 		select {
@@ -89,7 +93,10 @@ func (s *Server) Gossip() {
 		return
 	}
 	i := rand.Intn(len(s.peers))
-	s.gossipOnce(s.peers[i])
+	err := s.gossipOnce(s.peers[i])
+	if err != nil {
+		s.Warn("Failed to gossip", "dst", s.peers[i], "err", err)
+	}
 }
 
 type withError struct {
@@ -101,7 +108,7 @@ func JSONHandler[In any, Out any](h func(In) (Out, error)) func(http.ResponseWri
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in In
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
 			return
 		}
 
@@ -143,7 +150,7 @@ func (s *Server) read(in KV) (KV, error) {
 
 	col, ok := s.lookup(in.Key)
 	if !ok {
-		return in, newerr(http.StatusNotFound, fmt.Errorf("read %q: does not exist", in.Key))
+		return in, newerr(http.StatusNotFound, fmt.Errorf("read %s: does not exist", in.Key))
 	}
 	newctx := col.Clock.Context.Clone()
 	newctx.TakeMax(in.Context)
@@ -184,11 +191,11 @@ func (s *Server) update(in KV, allowRewrite bool) (KV, error) {
 	}
 
 	s.maxcc.TakeMax(in.Context)
-	s.maxcc.Mark(s.name)
+	s.maxcc.Mark(s.Name)
 	newclock := CausalClock{
 		ID:         uuid.New(),
 		Context:    s.maxcc.Clone(),
-		Replicated: map[string]nothing{s.name: {}},
+		Replicated: map[string]nothing{s.Name: {}},
 	}
 
 	s.events = append(s.events, Column{
@@ -212,17 +219,21 @@ type ViewChange struct {
 }
 
 func (s *Server) viewChange(in ViewChange) (nothing, error) {
+	s.Info("Receiving view change")
 	var next []*url.URL
 	for _, replica := range in.Replicas {
 		addr, err := url.Parse(replica)
 		if err != nil {
+			s.Info("View change has invalid URL", "url", replica)
 			return nothing{}, err
 		}
-		if addr.Host == s.name {
+		if addr.Host == s.Name {
 			continue
 		}
+		s.Info("Saving host", "host", addr.Host)
 		next = append(next, addr)
 		if !in.DoNotForward {
+			s.Info("Forwarding view change", "dst", replica)
 			if err := s.forwardViewChange(in, replica); err != nil {
 				return nothing{}, err
 			}
@@ -246,8 +257,8 @@ func (s *Server) forwardViewChange(in ViewChange, addr string) error {
 	if err != nil {
 		return err
 	}
-	httpreq.Header.Set("User-Agent", s.name)
-	resp, err := s.client.Do(httpreq)
+	httpreq.Header.Set("User-Agent", s.Name)
+	resp, err := s.Client.Do(httpreq)
 	if err != nil {
 		return err
 	}
@@ -266,7 +277,7 @@ func (s *Server) gossipOnce(dst *url.URL) error {
 		return nil
 	}
 	req := Gossip{
-		Host:    s.name,
+		Host:    s.Name,
 		Columns: replicate,
 	}
 
@@ -373,9 +384,9 @@ func (s *Server) playLog(host string, log []Column) (updated []Column) {
 
 		// Build the new clock, marking it as an event ourselves.
 		s.maxcc.TakeMax(col.Clock.Context)
-		s.maxcc.Mark(s.name)
+		s.maxcc.Mark(s.Name)
 		col.Clock.Context = s.maxcc.Clone()
-		col.Clock.Replicated[s.name] = nothing{}
+		col.Clock.Replicated[s.Name] = nothing{}
 
 		// Append it to history.
 		s.events = append(s.events, col)
@@ -412,9 +423,9 @@ func (s *Server) JSONRequest(method string, addr string, input any, output any) 
 	if err != nil {
 		return err
 	}
-	httpreq.Header.Set("User-Agent", s.name)
+	httpreq.Header.Set("User-Agent", s.Name)
 	httpreq.Header.Set("Content-Type", "application/json")
-	httpresp, err := s.client.Do(httpreq)
+	httpresp, err := s.Client.Do(httpreq)
 	if err != nil {
 		return err
 	}

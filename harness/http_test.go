@@ -97,7 +97,11 @@ func (i *MyImpl) CreateNode(nodename string) error {
 	if err != nil {
 		return err
 	}
-	s := server.NewServer(mux, cli, nodename, 10*time.Millisecond)
+	s := server.NewServer(mux, server.Opts{
+		Client:     cli,
+		Name:       nodename,
+		GossipFreq: 10 * time.Millisecond,
+	})
 	if err := i.srvclientpool.ViewChange(nodename); err != nil {
 		return err
 	}
